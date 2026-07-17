@@ -1,4 +1,4 @@
-import { createFileRoute } from '@tanstack/react-router'
+import { createFileRoute, notFound } from '@tanstack/react-router'
 import { useIntl } from 'react-intl'
 import { RssIcon } from '@heroicons/react/24/outline'
 import { Button } from '@/components/ui/button'
@@ -6,6 +6,10 @@ import { PageHeader } from '@/components/shared/page-header'
 import { ChangelogListPublic } from '@/components/portal/changelog'
 
 export const Route = createFileRoute('/_portal/changelog/')({
+  // Astari fork: changelog is hidden from the portal entirely.
+  beforeLoad: () => {
+    throw notFound()
+  },
   loader: async ({ context }) => {
     return {
       workspaceName: context.settings?.name ?? 'Quackback',

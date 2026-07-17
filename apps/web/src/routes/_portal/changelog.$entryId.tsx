@@ -7,6 +7,10 @@ import { BackLink } from '@/components/ui/back-link'
 import type { ChangelogId } from '@quackback/ids'
 
 export const Route = createFileRoute('/_portal/changelog/$entryId')({
+  // Astari fork: changelog is hidden from the portal entirely.
+  beforeLoad: () => {
+    throw notFound()
+  },
   loader: async ({ context, params }) => {
     const { queryClient } = context
     const entryId = params.entryId as ChangelogId

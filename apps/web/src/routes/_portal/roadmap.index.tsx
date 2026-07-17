@@ -1,4 +1,4 @@
-import { createFileRoute } from '@tanstack/react-router'
+import { createFileRoute, notFound } from '@tanstack/react-router'
 import { useSuspenseQuery } from '@tanstack/react-query'
 import { FormattedMessage } from 'react-intl'
 import { z } from 'zod'
@@ -15,6 +15,10 @@ const searchSchema = z.object({
 })
 
 export const Route = createFileRoute('/_portal/roadmap/')({
+  // Astari fork: roadmap is hidden from the portal entirely.
+  beforeLoad: () => {
+    throw notFound()
+  },
   validateSearch: searchSchema,
   loader: async ({ context }) => {
     const { queryClient, settings, baseUrl, userRole } = context
