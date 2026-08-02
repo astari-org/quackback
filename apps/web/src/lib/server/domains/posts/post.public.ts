@@ -55,7 +55,13 @@ function getPostSortOrder(sort: SortOrder) {
   switch (sort) {
     case 'new':
       return desc(posts.createdAt)
+    // 'trending' and 'top' are deliberately swapped. The in-app "Suggest a feature"
+    // webview opens the board on ?sort=trending, and that landing view should show the
+    // most-voted requests. URLs and tab labels stay as they are; only the ordering
+    // behind them is exchanged.
     case 'trending':
+      return desc(posts.voteCount)
+    case 'top':
       return sql`(${posts.voteCount} / GREATEST(1, EXTRACT(EPOCH FROM (NOW() - ${posts.createdAt})) / 86400)) DESC`
     default:
       return desc(posts.voteCount)
