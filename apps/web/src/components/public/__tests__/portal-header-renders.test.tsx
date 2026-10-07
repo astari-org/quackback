@@ -154,7 +154,8 @@ describe('PortalHeader renders', () => {
     await act(() => router.navigate({ to: '/roadmap' }))
     await screen.findByText('roadmap page')
 
-    expect(activeTabs(container)).toEqual(['/roadmap'])
+    // Astari fork: the roadmap tab is hidden, so no tab is highlighted here.
+    expect(activeTabs(container)).toEqual([])
     expect(accountMenu()).toBe(menu)
     expect(counts.bell).toBe(bell)
     expect(counts.themeMenu).toBe(themeMenu)

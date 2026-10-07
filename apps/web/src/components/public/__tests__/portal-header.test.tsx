@@ -265,7 +265,12 @@ describe('PortalHeader branding preview drafts', () => {
     mockGetRouteContext.mockReturnValue({
       session: null,
       settings: {
-        featureFlags: { ...DEFAULT_FEATURE_FLAGS, ...getProductFlagUpdate('feedback', true) },
+        // Astari fork: roadmap/changelog tabs are hidden, so the help tab stands in.
+        featureFlags: {
+          ...DEFAULT_FEATURE_FLAGS,
+          ...getProductFlagUpdate('feedback', true),
+          ...getProductFlagUpdate('helpCenter', true),
+        },
       },
       registeredAuthProviders: [],
     })
@@ -293,7 +298,7 @@ describe('PortalHeader branding preview drafts', () => {
     )
     const renders = () => mockHasAny.mock.calls.length
     const settled = renders()
-    expect(screen.getByRole('link', { name: 'Roadmap' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Help Center' })).toBeInTheDocument()
 
     act(() => drafts.setCss!(':root { --font-sans: Inter; }'))
     act(() =>
@@ -309,7 +314,7 @@ describe('PortalHeader branding preview drafts', () => {
         nav: {
           items: [
             { id: 'feedback', type: 'feedback' },
-            { id: 'roadmap', type: 'roadmap', label: 'Plans' },
+            { id: 'help', type: 'help', label: 'Plans' },
           ],
         },
       })
