@@ -1,8 +1,9 @@
 import { Button } from '@/components/ui/button'
+import { describePlanRefusal } from '@/lib/shared/describe-upgrade'
 import { cn } from '@/lib/shared/utils'
 
 interface ErrorPageProps {
-  error: Error
+  error: unknown
   reset?: () => void
   fullPage?: boolean
 }
@@ -29,27 +30,113 @@ export function FriendlyShell({ children, fullPage = true }: FriendlyShellProps)
 }
 
 /**
+ * Router error boundaries deliver `unknown` (and sometimes a serialized
+ * `{ message }` payload rather than an Error). Read the diagnostic text
+ * without requiring `instanceof Error`.
+ */
+export function errorMessage(error: unknown): string {
+  if (typeof error === 'string') return error
+  if (
+    error !== null &&
+    typeof error === 'object' &&
+    'message' in error &&
+    typeof error.message === 'string'
+  ) {
+    return error.message
+  }
+  return 'An unexpected error occurred'
+}
+
+export function toError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(errorMessage(error))
+}
+
+/**
  * True for the role-gate failures thrown by requireAuth / requireWorkspaceRole
  * (e.g. "Access denied: Requires [admin], got member"). These are expected
  * outcomes, not crashes, so they get a calm permission notice rather than the
  * scary generic error treatment.
  */
-export function isAuthorizationError(error: Error): boolean {
-  return /access denied/i.test(error.message)
+export function isAuthorizationError(error: unknown): boolean {
+  return /access denied/i.test(errorMessage(error))
+}
+
+/**
+ * True for a plan entitlement refusal that leaked into a route error
+ * boundary. Those sentences are commercial outcomes, not crashes.
+ */
+export function isEntitlementError(error: unknown): boolean {
+  const message = errorMessage(error)
+  return /upgrade to \w+ to enable it/i.test(message) || /not included in your plan/i.test(message)
 }
 
 export function PermissionDeniedPage({ fullPage = true }: { fullPage?: boolean }) {
+  // Teammates who bounce off an admin-only page get a path back to their work
+  // surfaces; portal visitors get the public exit (for them "Back to Feedback"
+  // would just be denied again). Error boundaries can render outside router
+  // context, so read the path from the window rather than a router hook.
+  const isAdminArea = typeof window !== 'undefined' && window.location.pathname.startsWith('/admin')
+
   return (
     <FriendlyShell fullPage={fullPage}>
-      <h1 className="text-2xl font-semibold tracking-tight">You don't have access to this page.</h1>
+      <h1 className="text-2xl font-semibold tracking-tight">You don&apos;t have access</h1>
       <p className="mt-2 text-sm text-muted-foreground">
-        This area is limited to workspace admins. If you think that's a mistake, ask an admin on
-        your team for access.
+        Only people with the right permissions can open this page. Ask a workspace admin if you need
+        access.
       </p>
 
-      <div className="mt-6">
+      <div className="mt-6 flex items-center justify-center gap-3">
+        {isAdminArea ? (
+          <>
+            <Button asChild>
+              <a href="/admin/feedback">Back to Feedback</a>
+            </Button>
+            <Button variant="outline" asChild>
+              <a href="/">View public board</a>
+            </Button>
+          </>
+        ) : (
+          <Button variant="outline" asChild>
+            <a href="/">Go home</a>
+          </Button>
+        )}
+      </div>
+    </FriendlyShell>
+  )
+}
+
+export function EntitlementRequiredPage({
+  error,
+  fullPage = true,
+}: {
+  error: unknown
+  fullPage?: boolean
+}) {
+  const normalized = toError(error)
+  const isAdminArea = typeof window !== 'undefined' && window.location.pathname.startsWith('/admin')
+  const refusal = describePlanRefusal(error, {
+    entitlement: null,
+    feature: 'This feature',
+    requiredPlan: null,
+    requiredPlanName: null,
+    headline: 'This is a plan feature',
+    body: normalized.message,
+  })
+
+  return (
+    <FriendlyShell fullPage={fullPage}>
+      <h1 className="text-2xl font-semibold tracking-tight">{refusal.headline}</h1>
+      <p className="mt-2 text-sm text-muted-foreground">{normalized.message}</p>
+      <div className="mt-6 flex items-center justify-center gap-3">
+        {isAdminArea ? (
+          <Button asChild>
+            <a href="/admin/settings/billing">
+              {refusal.requiredPlanName ? `Upgrade to ${refusal.requiredPlanName}` : 'See plans'}
+            </a>
+          </Button>
+        ) : null}
         <Button variant="outline" asChild>
-          <a href="/">Go home</a>
+          <a href={isAdminArea ? '/admin/settings' : '/'}>Go back</a>
         </Button>
       </div>
     </FriendlyShell>
@@ -60,20 +147,24 @@ export function DefaultErrorPage({ error, reset, fullPage = true }: ErrorPagePro
   if (isAuthorizationError(error)) {
     return <PermissionDeniedPage fullPage={fullPage} />
   }
+  if (isEntitlementError(error)) {
+    return <EntitlementRequiredPage error={error} fullPage={fullPage} />
+  }
 
+  const message = errorMessage(error)
   return (
     <FriendlyShell fullPage={fullPage}>
-      <h1 className="text-2xl font-semibold tracking-tight">Something went wrong.</h1>
+      <h1 className="text-2xl font-semibold tracking-tight">Something went wrong</h1>
       <p className="mt-2 text-sm text-muted-foreground">
         An unexpected error occurred. Try again, or return to the home page.
       </p>
 
-      {error.message && (
+      {message && (
         <details className="mt-4 rounded-md border bg-muted/40 px-4 py-3 text-left">
           <summary className="cursor-pointer text-xs font-medium text-muted-foreground">
             Technical details
           </summary>
-          <p className="mt-2 break-words text-sm text-muted-foreground">{error.message}</p>
+          <p className="mt-2 break-words text-sm text-muted-foreground">{message}</p>
         </details>
       )}
 
@@ -94,10 +185,10 @@ export function DefaultErrorPage({ error, reset, fullPage = true }: ErrorPagePro
 export function NotFoundPage() {
   return (
     <FriendlyShell>
-      <h1 className="text-2xl font-semibold tracking-tight">That page has flown the pond.</h1>
+      <h1 className="text-2xl font-semibold tracking-tight">Page not found</h1>
       <p className="mt-2 text-sm text-muted-foreground">
-        We couldn't find what you were looking for. It may have been moved, or the link might be
-        wrong.
+        The page you're looking for doesn't exist. It may have been moved or deleted, or the link
+        may be incorrect.
       </p>
 
       <div className="mt-6">

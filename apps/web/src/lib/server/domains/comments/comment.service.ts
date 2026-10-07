@@ -4,15 +4,20 @@ import {
   and,
   isNull,
   sql,
-  comments,
+  postComments,
   posts,
   postStatuses,
-  type Comment,
+  type PostComment,
   type ModerationState,
 } from '@/lib/server/db'
-import { type CommentId, type PrincipalId, type StatusId, type UserId } from '@quackback/ids'
+import {
+  type PostCommentId,
+  type PrincipalId,
+  type PostStatusId,
+  type UserId,
+} from '@quackback/ids'
 import { NotFoundError, ValidationError, ForbiddenError } from '@/lib/shared/errors'
-import { isTeamMember } from '@/lib/shared/roles'
+import { isTeamMember, Role } from '@/lib/shared/roles'
 import { subscribeToPost } from '@/lib/server/domains/subscriptions/subscription.service'
 import {
   dispatchCommentUpdated,
@@ -21,9 +26,8 @@ import {
   buildEventActor,
 } from '@/lib/server/events/dispatch'
 import { dispatchCommentCreatedEvent } from './comment.announce'
-import { commentMarkdownToTiptapJson } from '@/lib/server/markdown-tiptap'
-import { sanitizeTiptapContent } from '@/lib/server/sanitize-tiptap'
-import type { TiptapContent } from '@/lib/shared/db-types'
+import { prepareCommentContent } from './comment-content'
+import { contentHoldReason } from '@/lib/server/content/content-holds'
 import type { CreateCommentInput, CreateCommentResult, UpdateCommentInput } from './comment.types'
 import { canCreateComment } from '@/lib/server/policy/posts'
 import type { Actor } from '@/lib/server/policy/types'
@@ -31,27 +35,9 @@ import { recordAuditEvent } from '@/lib/server/audit/log'
 import { getPortalConfig } from '@/lib/server/domains/settings/settings.service'
 import { createActivity } from '@/lib/server/domains/activity/activity.service'
 import { logger } from '@/lib/server/logger'
+import { adjustCanonicalCommentCount } from '@/lib/server/domains/posts/post.merge-ids'
 
 const log = logger.child({ component: 'comments' })
-
-/**
- * Resolve the TipTap doc to store. UI clients send `contentJson` directly
- * (the editor produces it natively); REST/API callers post only markdown,
- * so we parse + sanitise on their behalf. Markdown stays the API source of
- * truth; the JSON column is a render-time cache.
- *
- * Provided JSON is sanitised before storage: the read path prefers
- * contentJson, so a caller who supplied innocuous `content` and a wholly
- * different JSON shape would otherwise be able to render arbitrary nodes
- * regardless of the 5,000-char content cap.
- */
-function resolveContentJson(
-  content: string,
-  provided: TiptapContent | null | undefined
-): TiptapContent {
-  if (provided) return sanitizeTiptapContent(provided)
-  return commentMarkdownToTiptapJson(content)
-}
 
 export async function createComment(
   input: CreateCommentInput,
@@ -61,7 +47,7 @@ export async function createComment(
     name?: string
     email?: string
     displayName?: string
-    role: 'admin' | 'member' | 'user'
+    role: Role
   },
   actor: Actor,
   options?: { skipDispatch?: boolean; headers?: Headers }
@@ -96,19 +82,14 @@ export async function createComment(
   if (!decision.allowed) {
     throw new ForbiddenError('FORBIDDEN', decision.reason)
   }
-  // canCreateComment.requiresApproval is true when the actor is non-team and
-  // the resolved `moderation.comments` rule is `'on'`. Held comments land
-  // with moderationState='pending' so they don't appear publicly until a
-  // moderator approves them via approveCommentFn.
-  const initialModerationState: ModerationState = decision.requiresApproval
-    ? 'pending'
-    : 'published'
+  // Author-type hold is decided here; content holds (images/links) are OR'd
+  // on after we have canonical contentJson below.
 
   // Validate parent comment exists if specified
   let parentIsPrivate = false
   if (input.parentId) {
-    const parentComment = await db.query.comments.findFirst({
-      where: eq(comments.id, input.parentId),
+    const parentComment = await db.query.postComments.findFirst({
+      where: eq(postComments.id, input.parentId),
     })
     if (!parentComment) {
       throw new ValidationError(
@@ -153,16 +134,28 @@ export async function createComment(
   const shouldChangeStatus = !!(input.statusId && authorIsTeamMember && !input.parentId)
 
   const trimmedContent = input.content.trim()
-  const contentJson = resolveContentJson(trimmedContent, input.contentJson)
+  const { content: storedContent, contentJson } = await prepareCommentContent({
+    content: trimmedContent,
+    contentJson: input.contentJson,
+    authorIsTeamMember,
+    principalId: author.principalId,
+  })
+  const holdReason = authorIsTeamMember
+    ? null
+    : contentHoldReason(portalConfig.moderationDefault, contentJson, storedContent)
+  const initialModerationState: ModerationState =
+    decision.requiresApproval || holdReason ? 'pending' : 'published'
 
-  let comment: Comment
+  let comment: PostComment
   let previousStatusName: string | null = null
   let newStatusName: string | null = null
 
   if (shouldChangeStatus) {
     // Fetch new status and current post status in parallel
     const [newStatus, prevStatus] = await Promise.all([
-      db.query.postStatuses.findFirst({ where: eq(postStatuses.id, input.statusId as StatusId) }),
+      db.query.postStatuses.findFirst({
+        where: eq(postStatuses.id, input.statusId as PostStatusId),
+      }),
       post.statusId
         ? db.query.postStatuses.findFirst({ where: eq(postStatuses.id, post.statusId) })
         : null,
@@ -178,10 +171,10 @@ export async function createComment(
     // Atomic transaction: insert comment + update post status + conditionally increment comment count
     const result = await db.transaction(async (tx) => {
       const [insertedComment] = await tx
-        .insert(comments)
+        .insert(postComments)
         .values({
           postId: input.postId,
-          content: trimmedContent,
+          content: storedContent,
           contentJson,
           parentId: input.parentId || null,
           principalId: author.principalId,
@@ -197,7 +190,7 @@ export async function createComment(
       await tx
         .update(posts)
         .set({
-          statusId: input.statusId as StatusId,
+          statusId: input.statusId as PostStatusId,
           // Private and pending comments don't count toward the public
           // commentCount. Pending comments are held back from public reads
           // (see post.public.detail.ts) — `approveCommentFn` re-increments
@@ -209,6 +202,10 @@ export async function createComment(
             : { commentCount: sql`${posts.commentCount} + 1` }),
         })
         .where(eq(posts.id, input.postId))
+
+      if (!isPrivate && initialModerationState !== 'pending') {
+        await adjustCanonicalCommentCount(input.postId, 1, tx)
+      }
 
       return insertedComment
     })
@@ -238,10 +235,10 @@ export async function createComment(
     // Atomic transaction: insert comment + conditionally increment comment count
     const result = await db.transaction(async (tx) => {
       const [insertedComment] = await tx
-        .insert(comments)
+        .insert(postComments)
         .values({
           postId: input.postId,
-          content: trimmedContent,
+          content: storedContent,
           contentJson,
           parentId: input.parentId || null,
           principalId: author.principalId,
@@ -261,6 +258,7 @@ export async function createComment(
           .update(posts)
           .set({ commentCount: sql`${posts.commentCount} + 1` })
           .where(eq(posts.id, input.postId))
+        await adjustCanonicalCommentCount(input.postId, 1, tx)
       }
 
       return insertedComment
@@ -283,7 +281,13 @@ export async function createComment(
       headers: options?.headers,
       target: { type: 'comment', id: comment.id },
       after: { moderationState: 'pending' },
-      metadata: { postId: post.id, boardId: board.id, principalType: actor.principalType },
+      metadata: {
+        postId: post.id,
+        boardId: board.id,
+        principalType: actor.principalType,
+        ...(holdReason ? { reason: holdReason } : {}),
+        previouslyPublished: false,
+      },
     })
   }
 
@@ -327,14 +331,14 @@ export async function createComment(
 }
 
 export async function updateComment(
-  id: CommentId,
+  id: PostCommentId,
   input: UpdateCommentInput,
-  actor: { principalId: PrincipalId; role: 'admin' | 'member' | 'user'; userId?: UserId }
-): Promise<Comment> {
+  actor: { principalId: PrincipalId; role: Role; userId?: UserId }
+): Promise<PostComment> {
   log.info({ comment_id: id }, 'update comment')
   // Get existing comment with post and board in single query
-  const existingComment = await db.query.comments.findFirst({
-    where: eq(comments.id, id),
+  const existingComment = await db.query.postComments.findFirst({
+    where: eq(postComments.id, id),
     with: {
       post: {
         with: { board: true },
@@ -365,21 +369,27 @@ export async function updateComment(
     }
   }
 
-  // Build update data
-  const updateData: Partial<Comment> = {}
-  if (input.content !== undefined) {
-    const trimmed = input.content.trim()
-    updateData.content = trimmed
-    updateData.contentJson = resolveContentJson(trimmed, input.contentJson)
-  } else if (input.contentJson !== undefined) {
-    updateData.contentJson = input.contentJson
+  // Build update data. contentJson-only updates still go through sanitize +
+  // rehost so a caller cannot persist hostile image srcs (the sanitizer is
+  // the only gate; the zod schema is z.unknown()).
+  const updateData: Partial<PostComment> = {}
+  if (input.content !== undefined || input.contentJson !== undefined) {
+    const trimmed = (input.content ?? existingComment.content).trim()
+    const prepared = await prepareCommentContent({
+      content: trimmed,
+      contentJson: input.contentJson ?? undefined,
+      authorIsTeamMember: isTeamMember(actor.role),
+      principalId: actor.principalId,
+    })
+    updateData.content = prepared.content
+    updateData.contentJson = prepared.contentJson
   }
 
   // Update the comment
   const [updatedComment] = await db
-    .update(comments)
+    .update(postComments)
     .set(updateData)
-    .where(eq(comments.id, id))
+    .where(eq(postComments.id, id))
     .returning()
 
   if (!updatedComment) {
@@ -421,13 +431,13 @@ export async function updateComment(
  * @returns Result indicating success or an error
  */
 export async function deleteComment(
-  id: CommentId,
-  actor: { principalId: PrincipalId; role: 'admin' | 'member' | 'user'; userId?: UserId }
+  id: PostCommentId,
+  actor: { principalId: PrincipalId; role: Role; userId?: UserId }
 ): Promise<void> {
   log.info({ comment_id: id }, 'delete comment')
   // Get existing comment with post and board in single query
-  const existingComment = await db.query.comments.findFirst({
-    where: eq(comments.id, id),
+  const existingComment = await db.query.postComments.findFirst({
+    where: eq(postComments.id, id),
     with: {
       post: {
         with: { board: true },
@@ -450,7 +460,20 @@ export async function deleteComment(
 
   // Atomic transaction: delete comment + conditionally decrement comment count
   await db.transaction(async (tx) => {
-    const result = await tx.delete(comments).where(eq(comments.id, id)).returning()
+    const countedRows = await tx.execute(sql`
+      WITH RECURSIVE subtree AS (
+        SELECT id, is_private, moderation_state, deleted_at
+        FROM ${postComments} WHERE id = ${id}
+        UNION ALL
+        SELECT child.id, child.is_private, child.moderation_state, child.deleted_at
+        FROM ${postComments} child
+        JOIN subtree parent ON child.parent_id = parent.id
+      )
+      SELECT count(*)::int AS count FROM subtree
+      WHERE deleted_at IS NULL AND is_private = false AND moderation_state <> 'pending'
+    `)
+    const [counted] = Array.from(countedRows as Iterable<{ count: number }>)
+    const result = await tx.delete(postComments).where(eq(postComments.id, id)).returning()
     if (result.length === 0) {
       throw new NotFoundError('COMMENT_NOT_FOUND', `Comment with ID ${id} not found`)
     }
@@ -460,14 +483,13 @@ export async function deleteComment(
     // published + counted a previously-pending comment between the read and
     // here. Skip when already soft-deleted (the soft-delete already decremented)
     // or when the comment was never counted (private / still-pending).
-    const deleted = result[0]
-    const shouldDecrement =
-      !deleted.deletedAt && !deleted.isPrivate && deleted.moderationState !== 'pending'
-    if (shouldDecrement) {
+    const decrement = Number(counted?.count ?? 0)
+    if (decrement > 0) {
       await tx
         .update(posts)
-        .set({ commentCount: sql`GREATEST(0, ${posts.commentCount} - ${result.length})` })
+        .set({ commentCount: sql`GREATEST(0, ${posts.commentCount} - ${decrement})` })
         .where(eq(posts.id, existingComment.postId))
+      await adjustCanonicalCommentCount(existingComment.postId, -decrement, tx)
     }
   })
 

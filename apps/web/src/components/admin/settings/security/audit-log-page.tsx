@@ -18,6 +18,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
+import { useLocalDateFormatter } from '@/components/ui/local-date'
 import {
   Select,
   SelectContent,
@@ -28,11 +29,12 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { adminQueries } from '@/lib/client/queries/admin'
+import { ASSISTANT_CONFIG_EVENT_LABELS } from '@/lib/shared/assistant/config-audit-events'
 import type { AuditEventRow } from '@/lib/server/functions/audit-log'
 
 /**
  * Event-type catalog for the filter dropdown. Mirrors the
- * AuditEventType union — sourced from the server to keep the two in
+ * AuditEventType union, sourced from the server to keep the two in
  * lockstep would be neat, but a curated short list is friendlier for
  * the dropdown.
  *
@@ -60,6 +62,7 @@ const FILTER_EVENT_TYPES: FilterEventOption[] = [
   { label: 'Email sign-in enabled', value: 'auth.magic_link.enabled' },
   { label: 'Email sign-in disabled', value: 'auth.magic_link.disabled' },
   { label: 'Two-factor reset by admin', value: 'two_factor.reset_by_admin' },
+  { label: 'Restore: external side effects settled', value: 'restore.side_effects_settled' },
   // Portal events
   {
     group: 'Portal',
@@ -80,8 +83,9 @@ const FILTER_EVENT_TYPES: FilterEventOption[] = [
   { group: 'Portal', label: 'Invite sent', value: 'portal.invite.sent' },
   { group: 'Portal', label: 'Sign-in failed', value: 'auth.signin.failed' },
   { group: 'Portal', label: 'Visibility changed', value: 'portal.visibility.changed' },
+  { group: 'Labs', label: 'Experiment changed', value: 'labs.experiment.changed' },
   { group: 'Portal', label: 'Widget sign-in changed', value: 'portal.widget_signin.changed' },
-  // Widget activity — separated because handshake events are high-volume on active workspaces.
+  // Widget activity, separated because handshake events are high-volume on active workspaces.
   // portal.widget_handshake.consumed is flagged excludeByDefault for future multi-select support.
   {
     group: WIDGET_ACTIVITY_GROUP,
@@ -94,6 +98,13 @@ const FILTER_EVENT_TYPES: FilterEventOption[] = [
     label: 'Handshake invalid',
     value: 'portal.widget_handshake.invalid',
   },
+  // AI config changelog events. The assistant admin page reads the same set
+  // from the shared label map so the two can never list a different set.
+  ...Object.entries(ASSISTANT_CONFIG_EVENT_LABELS).map(([value, label]) => ({
+    group: 'AI config',
+    label,
+    value,
+  })),
 ]
 
 const TIME_RANGES = [
@@ -122,32 +133,48 @@ export function rangeToFromIso(range: TimeRange): string | undefined {
   return new Date(now - days * 24 * 60 * 60 * 1000).toISOString()
 }
 
+// A stamp reads "May 13" and "12:48 AM", with the year in its title.
+// audit-log retention caps at 365 days by default so every row is within the
+// current year.
+const STAMP_DATE: Intl.DateTimeFormatOptions = { month: 'short', day: 'numeric' }
+const STAMP_TIME: Intl.DateTimeFormatOptions = { hour: 'numeric', minute: '2-digit' }
+const STAMP_FULL: Intl.DateTimeFormatOptions = {
+  year: 'numeric',
+  month: 'short',
+  day: 'numeric',
+  hour: 'numeric',
+  minute: '2-digit',
+}
+
 /**
- * Two-line timestamp: "May 13" above "12:48 AM". Keeps the When
- * column narrow without forcing the date string to wrap mid-word
- * when the table is squeezed by long target IDs. Year is omitted —
- * audit-log retention caps at 365 days by default so every row is
- * within the current year.
+ * Two-line timestamp: "May 13" above "12:48 AM", in the viewer's zone once
+ * hydrated. Keeps the When column narrow without forcing the date string to
+ * wrap mid-word when the table is squeezed by long target IDs.
  */
-function formatTimestamp(iso: string): { date: string; time: string; full: string } {
-  const d = new Date(iso)
-  return {
-    date: d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
-    time: d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }),
-    full: d.toLocaleString('en-US', {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric',
-      hour: 'numeric',
-      minute: '2-digit',
-    }),
-  }
+function StackedTimestamp({ iso }: { iso: string }) {
+  const format = useLocalDateFormatter('en-US')
+  return (
+    <div className="flex flex-col leading-tight" title={format(iso, STAMP_FULL)}>
+      <span>{format(iso, STAMP_DATE)}</span>
+      <span className="text-xs">{format(iso, STAMP_TIME)}</span>
+    </div>
+  )
+}
+
+/** One-line timestamp for the stacked mobile rows: "May 13 12:48 AM". */
+function InlineTimestamp({ iso }: { iso: string }) {
+  const format = useLocalDateFormatter('en-US')
+  return (
+    <span title={format(iso, STAMP_FULL)}>
+      {format(iso, STAMP_DATE)} {format(iso, STAMP_TIME)}
+    </span>
+  )
 }
 
 /**
  * Render the audit-log query result as CSV.
  *
- * Exported for testability — the CSV is the operator's primary
+ * Exported for testability, the CSV is the operator's primary
  * offline-forensics tool, so the column set is worth pinning with
  * unit tests rather than only exercising via the click path.
  */
@@ -196,21 +223,18 @@ export function rowsToCsv(rows: AuditEventRow[]): string {
 }
 
 function ActorCell({ row }: { row: AuditEventRow }) {
-  // Anonymous + service principals don't have an email — fall back to
-  // actorType so the row isn't a bare em-dash. This is the in-table
+  // Anonymous + service principals don't have an email, fall back to
+  // actorType so the row is never blank. This is the in-table
   // surface for the 0070_audit_log_observability migration's
   // actorType + authMethod columns; request_id stays in the CSV.
   const primary = row.actorEmail ?? (row.actorType ? `(${row.actorType})` : null)
-  if (!primary) return <span className="text-muted-foreground">—</span>
-  const subtitle = [row.actorRole, row.authMethod].filter(Boolean).join(' · ')
+  if (!primary) return <span className="text-muted-foreground">None</span>
+  const role = row.actorRole ? row.actorRole.charAt(0).toUpperCase() + row.actorRole.slice(1) : null
+  const subtitle = [role, row.authMethod].filter(Boolean).join(' · ')
   return (
     <div className="flex flex-col">
       <span className="truncate">{primary}</span>
-      {subtitle ? (
-        <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
-          {subtitle}
-        </span>
-      ) : null}
+      {subtitle ? <span className="text-xs text-muted-foreground">{subtitle}</span> : null}
     </div>
   )
 }
@@ -223,10 +247,10 @@ function ActorCell({ row }: { row: AuditEventRow }) {
  * row width.
  */
 function TargetCell({ row }: { row: AuditEventRow }) {
-  if (!row.targetType) return <span className="text-muted-foreground">—</span>
+  if (!row.targetType) return <span className="text-muted-foreground">None</span>
   return (
     <div className="flex flex-col">
-      <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
+      <span className="text-xs uppercase tracking-wide text-muted-foreground">
         {row.targetType}
       </span>
       {row.targetId ? (
@@ -268,7 +292,7 @@ export function AuditLogPage() {
   // 300ms feels instant without spamming.
   const debouncedActorEmail = useDebouncedValue(actorEmailInput, 300)
 
-  // High-volume events are hidden from the "All events" view by default —
+  // High-volume events are hidden from the "All events" view by default.
   // admins who want to see them pick the specific event type from the
   // dropdown. No separate toggle: the dropdown selection already says
   // exactly what the admin wants to see.
@@ -301,13 +325,13 @@ export function AuditLogPage() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-2">
           <Select value={eventType} onValueChange={setEventType}>
-            <SelectTrigger className="h-9 w-full sm:w-64 text-xs">
+            <SelectTrigger size="sm" className="w-full sm:w-64">
               <SelectValue placeholder="Event type" />
             </SelectTrigger>
             <SelectContent>
               {/* Ungrouped items first */}
               {FILTER_EVENT_TYPES.filter((o) => !o.group).map((opt) => (
-                <SelectItem key={opt.value} value={opt.value} className="text-xs">
+                <SelectItem key={opt.value} value={opt.value}>
                   {opt.label}
                 </SelectItem>
               ))}
@@ -316,16 +340,14 @@ export function AuditLogPage() {
                 new Set(FILTER_EVENT_TYPES.filter((o) => !!o.group).map((o) => o.group!))
               ).map((group) => (
                 <SelectGroup key={group}>
-                  <SelectLabel className="text-xs font-semibold text-muted-foreground px-2 py-1">
-                    {group}
-                  </SelectLabel>
+                  <SelectLabel className="text-muted-foreground px-2 py-1">{group}</SelectLabel>
                   {group === WIDGET_ACTIVITY_GROUP && (
-                    <p className="px-2 pb-1 text-[10px] text-muted-foreground leading-snug">
+                    <p className="px-2 pb-1 text-xs text-muted-foreground leading-snug">
                       High-volume on active workspaces. Pick a specific event to view it.
                     </p>
                   )}
                   {FILTER_EVENT_TYPES.filter((o) => o.group === group).map((opt) => (
-                    <SelectItem key={opt.value} value={opt.value} className="text-xs">
+                    <SelectItem key={opt.value} value={opt.value}>
                       {opt.label}
                     </SelectItem>
                   ))}
@@ -334,12 +356,12 @@ export function AuditLogPage() {
             </SelectContent>
           </Select>
           <Select value={timeRange} onValueChange={(v) => setTimeRange(v as TimeRange)}>
-            <SelectTrigger className="h-9 w-full sm:w-36 text-xs">
+            <SelectTrigger size="sm" className="w-full sm:w-36">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
               {TIME_RANGES.map((opt) => (
-                <SelectItem key={opt.value} value={opt.value} className="text-xs">
+                <SelectItem key={opt.value} value={opt.value}>
                   {opt.label}
                 </SelectItem>
               ))}
@@ -390,17 +412,10 @@ export function AuditLogPage() {
               </TableRow>
             ) : (
               rows.map((row) => {
-                const stamp = formatTimestamp(row.occurredAt)
                 return (
                   <TableRow key={row.id}>
-                    <TableCell
-                      className="whitespace-nowrap text-muted-foreground"
-                      title={stamp.full}
-                    >
-                      <div className="flex flex-col leading-tight">
-                        <span>{stamp.date}</span>
-                        <span className="text-[10px]">{stamp.time}</span>
-                      </div>
+                    <TableCell className="whitespace-nowrap text-muted-foreground">
+                      <StackedTimestamp iso={row.occurredAt} />
                     </TableCell>
                     <TableCell className="truncate font-mono" title={row.eventType}>
                       {row.eventType}
@@ -430,7 +445,6 @@ export function AuditLogPage() {
           </p>
         ) : (
           rows.map((row) => {
-            const stamp = formatTimestamp(row.occurredAt)
             return (
               <div key={row.id} className="p-3 space-y-2">
                 {/* Primary: event type + outcome */}
@@ -447,9 +461,7 @@ export function AuditLogPage() {
                 <div className="space-y-1 text-xs text-muted-foreground">
                   <div className="flex gap-2">
                     <span className="w-12 shrink-0 font-medium text-foreground/60">When</span>
-                    <span title={stamp.full}>
-                      {stamp.date} {stamp.time}
-                    </span>
+                    <InlineTimestamp iso={row.occurredAt} />
                   </div>
                   {row.actorEmail && (
                     <div className="flex gap-2">
@@ -461,9 +473,7 @@ export function AuditLogPage() {
                     <div className="flex gap-2">
                       <span className="w-12 shrink-0 font-medium text-foreground/60">Target</span>
                       <div className="min-w-0">
-                        <span className="uppercase tracking-wide text-[10px]">
-                          {row.targetType}
-                        </span>
+                        <span className="uppercase tracking-wide text-xs">{row.targetType}</span>
                         {row.targetId && (
                           <p className="font-mono text-[11px] truncate" title={row.targetId}>
                             {row.targetId}

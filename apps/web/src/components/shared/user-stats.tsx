@@ -1,7 +1,7 @@
 'use client'
 
 import { useQuery } from '@tanstack/react-query'
-import { getUserStatsFn } from '@/lib/server/functions/user'
+import { getUserStatsFn, type UserEngagementStats } from '@/lib/server/functions/user'
 import { cn } from '@/lib/shared/utils'
 
 function StatItem({
@@ -25,7 +25,7 @@ function StatItem({
       >
         {value ?? '-'}
       </span>
-      <span className={cn('text-muted-foreground mt-0.5', compact ? 'text-[10px]' : 'text-xs')}>
+      <span className={cn('text-muted-foreground mt-0.5', compact ? 'text-xs' : 'text-xs')}>
         {label}
       </span>
     </div>
@@ -36,12 +36,14 @@ interface UserStatsBarProps {
   compact?: boolean
   className?: string
   headers?: Record<string, string>
+  fetchStats?: () => Promise<UserEngagementStats>
 }
 
-export function UserStatsBar({ compact, className, headers }: UserStatsBarProps) {
+export function UserStatsBar({ compact, className, headers, fetchStats }: UserStatsBarProps) {
   const { data } = useQuery({
-    queryKey: headers ? ['widget', 'user', 'engagement-stats'] : ['user', 'engagement-stats'],
-    queryFn: () => getUserStatsFn(headers ? { headers } : undefined),
+    queryKey:
+      fetchStats || headers ? ['widget', 'user', 'engagement-stats'] : ['user', 'engagement-stats'],
+    queryFn: () => (fetchStats ? fetchStats() : getUserStatsFn(headers ? { headers } : undefined)),
     staleTime: 60 * 1000,
   })
 

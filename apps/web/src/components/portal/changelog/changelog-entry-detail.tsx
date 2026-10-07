@@ -1,7 +1,8 @@
 import { Link } from '@tanstack/react-router'
-import { RichTextContent, isRichTextContent } from '@/components/ui/rich-text-editor'
+import { RichTextContent, isRichTextContent } from '@/components/ui/rich-text-content'
 import { EmbedHydration } from '@/components/shared/embed-hydration'
 import { StatusBadge } from '@/components/ui/status-badge'
+import { LocalDate } from '@/components/ui/local-date'
 import { BackLink } from '@/components/ui/back-link'
 import { ChevronUpIcon } from '@heroicons/react/24/outline'
 import type { ChangelogId, PostId } from '@quackback/ids'
@@ -19,29 +20,34 @@ interface LinkedPost {
   } | null
 }
 
+interface CategoryBadge {
+  id: string
+  name: string
+  color: string
+}
+
 interface ChangelogEntryDetailProps {
   id: ChangelogId
   title: string
   content: string
   contentJson: TiptapContent | null
   publishedAt: string
+  featuredImageUrl: string | null
   linkedPosts: LinkedPost[]
+  categories?: CategoryBadge[]
 }
 
-function formatDate(iso: string) {
-  return new Date(iso).toLocaleDateString('en-US', {
-    month: 'long',
-    day: 'numeric',
-    year: 'numeric',
-  })
-}
+/** The entry's date, e.g. "October 1, 2026", in the reader's zone once hydrated. */
+const ENTRY_DATE: Intl.DateTimeFormatOptions = { month: 'long', day: 'numeric', year: 'numeric' }
 
 export function ChangelogEntryDetail({
   title,
   content,
   contentJson,
   publishedAt,
+  featuredImageUrl,
   linkedPosts,
+  categories = [],
 }: ChangelogEntryDetailProps) {
   return (
     <article>
@@ -53,23 +59,48 @@ export function ChangelogEntryDetail({
       <div className="flex gap-8 lg:gap-16">
         {/* Date sidebar */}
         <div className="hidden md:block w-40 shrink-0 pt-1">
-          <time dateTime={publishedAt} className="text-sm text-muted-foreground">
-            {formatDate(publishedAt)}
-          </time>
+          <LocalDate
+            date={publishedAt}
+            options={ENTRY_DATE}
+            className="text-sm text-muted-foreground"
+          />
         </div>
 
         {/* Main content */}
         <div className="flex-1 min-w-0">
           {/* Mobile date */}
-          <time
-            dateTime={publishedAt}
+          <LocalDate
+            date={publishedAt}
+            options={ENTRY_DATE}
             className="md:hidden text-sm text-muted-foreground mb-4 block"
-          >
-            {formatDate(publishedAt)}
-          </time>
+          />
+
+          {/* Category labels */}
+          {categories.length > 0 && (
+            <div className="mb-3 flex flex-wrap gap-1.5">
+              {categories.map((category) => (
+                <span
+                  key={category.id}
+                  className="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium"
+                  style={{ backgroundColor: category.color + '1a', color: category.color }}
+                >
+                  {category.name}
+                </span>
+              ))}
+            </div>
+          )}
 
           {/* Title */}
           <h1 className="text-3xl font-bold leading-tight">{title}</h1>
+
+          {/* Featured hero image */}
+          {featuredImageUrl && (
+            <img
+              src={featuredImageUrl}
+              alt={title}
+              className="mt-6 w-full rounded-xl border border-border/40 object-cover aspect-[2/1]"
+            />
+          )}
 
           {/* Rich content body */}
           <div className="mt-6">

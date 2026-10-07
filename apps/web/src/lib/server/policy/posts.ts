@@ -14,9 +14,12 @@ import {
 } from '@/lib/server/db'
 import type { PrincipalId } from '@quackback/ids'
 import { allowDecision, denyDecision, isTeamActor, type Actor, type Decision } from './types'
+import { can } from './authorize'
+import { PERMISSIONS } from '@/lib/shared/permissions'
 import { canViewBoard, boardViewFilter } from './boards'
 import { tierAllows } from './access'
 import { resolveWorkspaceModeration, type ModerationAxis } from '@/lib/shared/moderation-policy'
+import { normalizeBoardAccess } from '@/lib/shared/schemas/boards'
 
 /** The workspace moderation policy — the fallback that per-board
  *  `moderation` rules resolve against when set to `'inherit'`. */
@@ -61,13 +64,18 @@ interface BoardShape {
   access: BoardAccess
 }
 
+function accessOf(board: BoardShape): BoardAccess {
+  return normalizeBoardAccess(board.access)
+}
+
 const isTeam = isTeamActor
 
 export function canViewPost(actor: Actor, post: PostShape, board: BoardShape): Decision {
   const boardDecision = canViewBoard(actor, board)
   if (!boardDecision.allowed) return boardDecision
 
-  if (isTeam(actor)) {
+  // Seeing unpublished / private posts is the post.view_private capability.
+  if (can(actor, PERMISSIONS.POST_VIEW_PRIVATE)) {
     return post.moderationState === 'deleted' ? denyDecision('Post was removed') : allowDecision()
   }
 
@@ -88,7 +96,7 @@ export function canViewPost(actor: Actor, post: PostShape, board: BoardShape): D
  * `isNull(posts.deletedAt)` from existing list queries — never replaces it.
  */
 export function postViewFilter(actor: Actor): SQL {
-  if (isTeam(actor)) {
+  if (can(actor, PERMISSIONS.POST_VIEW_PRIVATE)) {
     return sql`${posts.moderationState} <> 'deleted'`
   }
   const principalIdParam: string | null = actor.principalId ?? null
@@ -151,8 +159,9 @@ export function canCreateComment(
   const view = canViewPost(actor, post, board)
   if (!view.allowed) return { allowed: false, reason: view.reason }
 
-  if (!tierAllows(actor, board.access.comment, board.access.segments.comment)) {
-    return { allowed: false, reason: tierDenyMessage('comment', board.access.comment) }
+  const access = accessOf(board)
+  if (!tierAllows(actor, access.comment, access.segments.comment)) {
+    return { allowed: false, reason: tierDenyMessage('comment', access.comment) }
   }
   if (post.isCommentsLocked && !isTeam(actor)) {
     return { allowed: false, reason: 'Comments are locked on this post' }
@@ -161,8 +170,7 @@ export function canCreateComment(
     allowed: true,
     requiresApproval:
       !isTeam(actor) &&
-      resolveModerationRule(board.access.moderation.comments, workspaceApproval, 'comments') ===
-        'on',
+      resolveModerationRule(access.moderation.comments, workspaceApproval, 'comments') === 'on',
   }
 }
 
@@ -184,8 +192,9 @@ export function canVotePost(actor: Actor, post: PostShape, board: BoardShape): V
   const view = canViewPost(actor, post, board)
   if (!view.allowed) return { allowed: false, reason: view.reason }
 
-  if (!tierAllows(actor, board.access.vote, board.access.segments.vote)) {
-    return { allowed: false, reason: tierDenyMessage('vote', board.access.vote) }
+  const access = accessOf(board)
+  if (!tierAllows(actor, access.vote, access.segments.vote)) {
+    return { allowed: false, reason: tierDenyMessage('vote', access.vote) }
   }
   return { allowed: true }
 }
@@ -211,8 +220,9 @@ export function canCreatePost(
   // Submit is then its own decision on top of view — a board can be public to
   // view but team-only to submit (admin-curated roadmap pattern), so the tier
   // check stays independent rather than collapsing into canViewBoard.
-  if (!tierAllows(actor, board.access.submit, board.access.segments.submit)) {
-    return { allowed: false, reason: tierDenyMessage('submit', board.access.submit) }
+  const access = accessOf(board)
+  if (!tierAllows(actor, access.submit, access.segments.submit)) {
+    return { allowed: false, reason: tierDenyMessage('submit', access.submit) }
   }
 
   // Team always bypasses the moderation queue.
@@ -225,7 +235,7 @@ export function canCreatePost(
   // map to signedPosts. The rule is then resolved against the workspace
   // default for `inherit`.
   const isAnon = actor.principalType !== 'user'
-  const rule = isAnon ? board.access.moderation.anonPosts : board.access.moderation.signedPosts
+  const rule = isAnon ? access.moderation.anonPosts : access.moderation.signedPosts
   const resolved = resolveModerationRule(
     rule,
     workspaceApproval,
@@ -258,7 +268,7 @@ export function boardCapabilitiesForActor(
   access: BoardAccess,
   allowAnonymous: boolean
 ): BoardCapabilities {
-  const board: BoardShape = { access }
+  const board: BoardShape = { access: normalizeBoardAccess(access) }
   const canSubmit = canCreatePost(actor, board, undefined).allowed
   // canVotePost / canCreateComment compose canViewPost; pass a published,
   // unauthored post so each decision reflects its own tier (callers already

@@ -17,8 +17,9 @@ import {
   postPermissionsKeys,
 } from '@/lib/client/hooks/use-portal-posts-query'
 import { portalDetailQueries, type PublicPostDetailView } from '@/lib/client/queries/portal-detail'
+import { adminQueries } from '@/lib/client/queries/admin'
 import type { PublicPostListItem } from '@/lib/shared/types'
-import type { PostId, BoardId, StatusId } from '@quackback/ids'
+import type { PostId, BoardId, PostStatusId } from '@quackback/ids'
 
 // ============================================================================
 // Types
@@ -26,7 +27,7 @@ import type { PostId, BoardId, StatusId } from '@quackback/ids'
 
 interface PublicPostListResult {
   items: PublicPostListItem[]
-  total: number
+  total?: number
   hasMore: boolean
 }
 
@@ -47,6 +48,8 @@ interface CreatePostInput {
   title: string
   content: string
   contentJson: unknown
+  /** Answers to the board's configured custom fields, keyed by field key. */
+  customFields?: Record<string, unknown>
 }
 
 interface UserEditPostInput {
@@ -201,13 +204,14 @@ export function useCreatePublicPost() {
   const queryClient = useQueryClient()
 
   return useMutation({
-    mutationFn: ({ boardId, title, content, contentJson }: CreatePostInput) =>
+    mutationFn: ({ boardId, title, content, contentJson, customFields }: CreatePostInput) =>
       createPublicPostFn({
         data: {
           boardId,
           title,
           content,
           contentJson: contentJson as { type: 'doc'; content?: unknown[] },
+          customFields,
         },
       }),
     onSuccess: (newPost) => {
@@ -223,7 +227,7 @@ export function useCreatePublicPost() {
             id: newPost.id as PostId,
             title: newPost.title,
             content: newPost.content,
-            statusId: newPost.statusId as StatusId | null,
+            statusId: newPost.statusId as PostStatusId | null,
             voteCount: newPost.voteCount,
             authorName: null, // Will be filled by server on refetch
             principalId: null,
@@ -241,7 +245,7 @@ export function useCreatePublicPost() {
                 return {
                   ...page,
                   items: [newPostItem, ...page.items],
-                  total: page.total + 1,
+                  total: page.total === undefined ? undefined : page.total + 1,
                 }
               }
               return page
@@ -259,6 +263,7 @@ export function useCreatePublicPost() {
 
       // Invalidate to get fresh data with all fields populated
       queryClient.invalidateQueries({ queryKey: publicPostsKeys.lists() })
+      queryClient.invalidateQueries({ queryKey: adminQueries.boardsWithCounts().queryKey })
     },
   })
 }
@@ -340,7 +345,7 @@ export function useUserDeletePost({ onSuccess, onError }: UseUserDeletePostOptio
             pages: old.pages.map((page) => ({
               ...page,
               items: page.items.filter((post) => post.id !== postId),
-              total: page.total - 1,
+              total: page.total === undefined ? undefined : page.total - 1,
             })),
           }
         }
@@ -349,6 +354,7 @@ export function useUserDeletePost({ onSuccess, onError }: UseUserDeletePostOptio
       queryClient.removeQueries({ queryKey: portalDetailQueries.postDetail(postId).queryKey })
       // Invalidate to get fresh data
       queryClient.invalidateQueries({ queryKey: publicPostsKeys.lists() })
+      queryClient.invalidateQueries({ queryKey: adminQueries.boardsWithCounts().queryKey })
       onSuccess?.()
     },
     onError: (error: Error) => {

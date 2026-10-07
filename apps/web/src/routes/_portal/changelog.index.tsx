@@ -2,8 +2,11 @@ import { createFileRoute, notFound } from '@tanstack/react-router'
 import { useIntl } from 'react-intl'
 import { RssIcon } from '@heroicons/react/24/outline'
 import { Button } from '@/components/ui/button'
-import { PageHeader } from '@/components/shared/page-header'
-import { ChangelogListPublic } from '@/components/portal/changelog'
+import { PortalPageHeader } from '@/components/public/portal-page-header'
+import { ChangelogListPublic, ChangelogSubscribeButton } from '@/components/portal/changelog'
+import { isProductEnabled } from '@/lib/shared/types/settings'
+import { setPublicDocumentCacheHeaders } from '@/lib/server/functions/public-cache'
+import { useSessionContext } from '@/lib/client/hooks/use-root-context'
 
 export const Route = createFileRoute('/_portal/changelog/')({
   // Astari fork: changelog is hidden from the portal entirely.
@@ -11,6 +14,8 @@ export const Route = createFileRoute('/_portal/changelog/')({
     throw notFound()
   },
   loader: async ({ context }) => {
+    if (!isProductEnabled(context.settings?.featureFlags, 'changelog')) throw notFound()
+    if (typeof window === 'undefined') await setPublicDocumentCacheHeaders()
     return {
       workspaceName: context.settings?.name ?? 'Quackback',
       baseUrl: context.baseUrl ?? '',
@@ -40,10 +45,12 @@ export const Route = createFileRoute('/_portal/changelog/')({
 
 function ChangelogPage() {
   const intl = useIntl()
+  const session = useSessionContext()
+  const isIdentified = !!session?.user && session.user.principalType !== 'anonymous'
 
   return (
     <div className="mx-auto max-w-6xl w-full px-4 sm:px-6 py-8">
-      <PageHeader
+      <PortalPageHeader
         size="large"
         title={intl.formatMessage({ id: 'portal.changelog.title', defaultMessage: 'Changelog' })}
         description={intl.formatMessage({
@@ -51,14 +58,20 @@ function ChangelogPage() {
           defaultMessage: 'Stay up to date with the latest product updates and shipped features.',
         })}
         action={
-          <Button variant="outline" size="sm" asChild className="shrink-0 gap-1.5">
-            <a href="/changelog/feed" target="_blank" rel="noopener noreferrer">
-              <RssIcon className="h-4 w-4" />
-              <span className="hidden sm:inline">
-                {intl.formatMessage({ id: 'portal.changelog.rssFeed', defaultMessage: 'RSS Feed' })}
-              </span>
-            </a>
-          </Button>
+          <div className="flex items-center gap-2">
+            <ChangelogSubscribeButton enabled={isIdentified} />
+            <Button variant="outline" size="sm" asChild className="shrink-0 gap-1.5">
+              <a href="/changelog/feed" target="_blank" rel="noopener noreferrer">
+                <RssIcon className="h-4 w-4" />
+                <span className="hidden sm:inline">
+                  {intl.formatMessage({
+                    id: 'portal.changelog.rssFeed',
+                    defaultMessage: 'RSS Feed',
+                  })}
+                </span>
+              </a>
+            </Button>
+          </div>
         }
         animate
         className="mb-8"

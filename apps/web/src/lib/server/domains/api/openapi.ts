@@ -138,6 +138,13 @@ Example: \`post_01h455vb4pex5vsknk084sn02q\`
       { name: 'Roadmaps', description: 'Manage roadmaps' },
       { name: 'Changelog', description: 'Manage changelog entries' },
       { name: 'Conversations', description: 'Manage support conversations' },
+      { name: 'Tickets', description: 'Manage support tickets' },
+      { name: 'Files', description: 'Upload files to attach to conversations and tickets' },
+      { name: 'Moderation', description: 'Review and moderate pending posts and comments' },
+      {
+        name: 'Status',
+        description: 'Manage the status page: components, incidents, and maintenance',
+      },
     ],
     paths: registeredPaths,
     components: {
@@ -199,7 +206,7 @@ export function createRequestBodySchema<T extends z.ZodRawShape>(shape: T, descr
  * This works around a type inference issue between Zod v4 and zod-openapi v5
  * where different package versions cause nominal type mismatches.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+// oxlint-disable-next-line @typescript-eslint/no-explicit-any
 export function asSchema<T extends z.ZodTypeAny>(schema: T): any {
   return schema
 }

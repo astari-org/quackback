@@ -5,6 +5,8 @@ import { publicChangelogQueries } from '@/lib/client/queries/changelog'
 import { ChangelogEntryDetail } from '@/components/portal/changelog'
 import { BackLink } from '@/components/ui/back-link'
 import type { ChangelogId } from '@quackback/ids'
+import { isProductEnabled } from '@/lib/shared/types/settings'
+import { setPublicDocumentCacheHeaders } from '@/lib/server/functions/public-cache'
 
 export const Route = createFileRoute('/_portal/changelog/$entryId')({
   // Astari fork: changelog is hidden from the portal entirely.
@@ -12,6 +14,8 @@ export const Route = createFileRoute('/_portal/changelog/$entryId')({
     throw notFound()
   },
   loader: async ({ context, params }) => {
+    if (typeof window === 'undefined') await setPublicDocumentCacheHeaders()
+    if (!isProductEnabled(context.settings?.featureFlags, 'changelog')) throw notFound()
     const { queryClient } = context
     const entryId = params.entryId as ChangelogId
 
@@ -66,7 +70,9 @@ function ChangelogEntryPage() {
           content={entry.content}
           contentJson={entry.contentJson}
           publishedAt={entry.publishedAt}
+          featuredImageUrl={entry.featuredImageUrl}
           linkedPosts={entry.linkedPosts}
+          categories={entry.categories}
         />
       </div>
     </div>

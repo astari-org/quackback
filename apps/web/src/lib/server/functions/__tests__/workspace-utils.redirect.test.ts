@@ -14,13 +14,18 @@ import { db } from '@/lib/server/db'
 
 const hoisted = vi.hoisted(() => ({
   mockGetSession: vi.fn(),
+  mockFindSettingsCached: vi.fn(),
 }))
 
 vi.mock('@/lib/server/auth/session', () => ({ getSession: hoisted.mockGetSession }))
+vi.mock('@/lib/server/domains/settings/settings.helpers', () => ({
+  findSettingsCached: hoisted.mockFindSettingsCached,
+}))
 
-vi.mock('@/lib/server/db', () => ({
+// Spread the real db module so tables/operators stay current; override only what this suite drives.
+vi.mock('@/lib/server/db', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/server/db')>()),
   db: { query: { settings: { findFirst: vi.fn() }, principal: { findFirst: vi.fn() } } },
-  principal: {},
   eq: vi.fn(),
 }))
 
@@ -86,7 +91,7 @@ describe('requireWorkspaceRole redirect target', () => {
 
   it('redirects wrong-role callers to sign-in dialog with not_team_member error', async () => {
     hoisted.mockGetSession.mockResolvedValue({ user: { id: 'user_001' } })
-    ;(db.query.settings.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 1 })
+    hoisted.mockFindSettingsCached.mockResolvedValue({ id: 1 })
     ;(db.query.principal.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue({ role: 'user' })
 
     const err = await requireWorkspaceRole({ data: { allowedRoles: ['admin', 'member'] } })

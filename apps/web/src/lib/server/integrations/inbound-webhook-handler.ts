@@ -8,15 +8,26 @@
  * so the `post.status_changed` event dispatched here won't re-trigger them.
  */
 
-import { db, integrations, postExternalLinks, eq, and } from '@/lib/server/db'
+import { createHash } from 'crypto'
+import { db, integrations, eq, and } from '@/lib/server/db'
 import { getIntegration } from './index'
-import { decryptSecrets } from './encryption'
-import { resolveStatusMapping, type StatusMappings } from './status-mapping'
-import { changeStatus } from '@/lib/server/domains/posts/post.status'
-import type { PostId, StatusId, PrincipalId } from '@quackback/ids'
+import { readTextBodyOr413, MAX_WEBHOOK_BODY_BYTES } from '@/lib/server/utils/read-body'
 import { logger } from '@/lib/server/logger'
 
 const log = logger.child({ component: 'inbound-webhook' })
+
+/**
+ * Per-delivery idempotency key for the close-the-loop side effects (note,
+ * bell, post activity). Providers redeliver webhooks (retry-after-timeout,
+ * at-least-once), and a redelivered request carries a byte-identical body —
+ * while a genuinely new event (even close→reopen→close on the same issue)
+ * differs in payload timestamps/ids. Hashing the raw body therefore dedupes
+ * exactly the redelivery case without suppressing real repeats, and needs no
+ * per-provider delivery-id header knowledge.
+ */
+function inboundDeliveryKey(integrationType: string, body: string): string {
+  return createHash('sha256').update(`${integrationType}:${body}`).digest('hex')
+}
 
 /**
  * Handle an inbound webhook from an external platform.
@@ -30,8 +41,9 @@ export async function handleInboundWebhook(
     return new Response('Unknown integration type', { status: 404 })
   }
 
-  // Read raw body (needed for HMAC verification)
-  const body = await request.text()
+  // Read raw body through the bounded reader (needed for HMAC verification)
+  const body = await readTextBodyOr413(request, MAX_WEBHOOK_BODY_BYTES)
+  if (body instanceof Response) return body
 
   // Get integration record
   const integration = await db.query.integrations.findFirst({
@@ -43,6 +55,9 @@ export async function handleInboundWebhook(
   if (!integration) {
     return new Response('Integration not configured', { status: 404 })
   }
+
+  const handshake = definition.inbound.handshake?.(request)
+  if (handshake) return handshake
 
   const config = (integration.config ?? {}) as Record<string, unknown>
   const webhookSecret = config.webhookSecret as string | undefined
@@ -57,74 +72,29 @@ export async function handleInboundWebhook(
     return verification
   }
 
-  // Decrypt secrets so handlers can access OAuth tokens
-  const secrets = integration.secrets ? decryptSecrets(integration.secrets) : {}
-
-  // Parse the webhook payload for a status change
-  const result = await definition.inbound.parseStatusChange(body, config, secrets)
-  if (!result) {
-    // Not a status change event — acknowledge but ignore
-    return new Response('OK', { status: 200 })
-  }
-
-  log.info(
-    {
-      integration_type: integrationType,
-      event_type: result.eventType,
-      external_id: result.externalId,
-      external_status: result.externalStatus,
-    },
-    'inbound status change received'
-  )
-
-  // Reverse lookup: find the post linked to this external ID
-  const link = await db.query.postExternalLinks.findFirst({
-    where: and(
-      eq(postExternalLinks.integrationType, integrationType),
-      eq(postExternalLinks.externalId, result.externalId)
-    ),
-  })
-  if (!link) {
-    log.debug(
-      { integration_type: integrationType, external_id: result.externalId },
-      'no linked post for external id, ignoring'
-    )
-    return new Response('OK', { status: 200 })
-  }
-
-  // Resolve status mapping
-  const statusMappings = config.statusMappings as StatusMappings | undefined
-  const statusId = resolveStatusMapping(result.externalStatus, statusMappings)
-  if (!statusId) {
-    log.debug(
-      { integration_type: integrationType, external_status: result.externalStatus },
-      'no status mapping, ignoring'
-    )
-    return new Response('OK', { status: 200 })
-  }
-
-  // Update the post status using the integration's service principal
-  try {
-    if (!integration.principalId) {
-      log.error(
-        { integration_type: integrationType },
-        'integration has no service principal, skipping status update'
-      )
-      return new Response('OK', { status: 200 })
+  // GitHub inbox channel is a second consumer, isolated from tracker status
+  // sync. It must run even when parseStatusChange returns null (comments are
+  // not status changes) and must never 500 the webhook.
+  if (integrationType === 'github') {
+    try {
+      const { ingestGitHubChannelEvent } =
+        await import('@/lib/server/domains/conversation/conversation.github-inbound')
+      await ingestGitHubChannelEvent({
+        body,
+        eventName: request.headers.get('X-GitHub-Event'),
+        integration,
+      })
+    } catch (error) {
+      log.error({ err: error, integration_type: integrationType }, 'inbound github channel failed')
+      return new Response('Inbox ingest failed', { status: 500 })
     }
-
-    await changeStatus(link.postId as PostId, statusId as StatusId, {
-      principalId: integration.principalId as PrincipalId,
-      displayName: `${integrationType} Integration`,
-    })
-    log.info(
-      { post_id: link.postId, status_id: statusId, integration_type: integrationType },
-      'inbound status update applied'
-    )
-  } catch (error) {
-    log.error({ err: error, integration_type: integrationType }, 'inbound status update failed')
-    // Still return 200 to prevent the platform from retrying
   }
 
+  try {
+    const { queueInboundWebhook } = await import('./sync/inbound')
+    await queueInboundWebhook(integration, body, inboundDeliveryKey(integrationType, body))
+  } catch {
+    return new Response('Could not accept status event', { status: 503 })
+  }
   return new Response('OK', { status: 200 })
 }

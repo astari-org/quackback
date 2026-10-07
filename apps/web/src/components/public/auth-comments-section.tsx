@@ -1,14 +1,15 @@
 import { useMemo } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { useRouter, useRouteContext } from '@tanstack/react-router'
+import { useRouter } from '@tanstack/react-router'
 import { CommentThread } from './comment-thread'
 import { useAuthPopoverSafe } from '@/components/auth/auth-popover-context'
 import { useAuthBroadcast } from '@/lib/client/hooks/use-auth-broadcast'
 import { useEnsureAnonSession } from '@/lib/client/hooks/use-ensure-anon-session'
-import { useCreateComment } from '@/lib/client/mutations'
+import { useCreateComment } from '@/lib/client/mutations/portal-comments'
 import type { PublicCommentView } from '@/lib/client/queries/portal-detail'
-import type { CommentId, PostId, PrincipalId } from '@quackback/ids'
+import type { PostCommentId, PostId, PrincipalId } from '@quackback/ids'
 import { resolveCommentingState } from '@/components/public/comment-permission'
+import { useSessionContext, useWorkspaceSettings } from '@/lib/client/hooks/use-root-context'
 
 interface AuthCommentsSectionProps {
   postId: PostId
@@ -24,7 +25,7 @@ interface AuthCommentsSectionProps {
   /** Enable comment pinning (admin only) */
   canPinComments?: boolean
   /** Callback when comment is pinned */
-  onPinComment?: (commentId: CommentId) => void
+  onPinComment?: (commentId: PostCommentId) => void
   /** Callback when comment is unpinned */
   onUnpinComment?: () => void
   /** Whether pin/unpin is in progress */
@@ -36,16 +37,22 @@ interface AuthCommentsSectionProps {
   currentStatusId?: string | null
   /** Whether the current user is a team member */
   isTeamMember?: boolean
+  /** Link comment authors to a profile behind a hover card. */
+  linkAuthors?: boolean
+  /** Destination for author links. Admin uses the enriched hover card. */
+  authorLinkTo?: 'portal' | 'admin'
   /** Hide the comment form area entirely (for readonly previews) */
   hideCommentForm?: boolean
   /** Callback when a comment is deleted */
-  onDeleteComment?: (commentId: CommentId) => void
+  onDeleteComment?: (commentId: PostCommentId) => void
   /** ID of the comment currently being deleted */
-  deletingCommentId?: CommentId | null
+  deletingCommentId?: PostCommentId | null
   /** Callback when a comment is restored (team only) */
-  onRestoreComment?: (commentId: CommentId) => void
+  onRestoreComment?: (commentId: PostCommentId) => void
   /** ID of the comment currently being restored */
-  restoringCommentId?: CommentId | null
+  restoringCommentId?: PostCommentId | null
+  onImageUpload?: (file: File) => Promise<string>
+  canModerate?: boolean
 }
 
 /**
@@ -69,15 +76,20 @@ export function AuthCommentsSection({
   statuses,
   currentStatusId,
   isTeamMember,
+  linkAuthors = false,
+  authorLinkTo = 'portal',
   hideCommentForm,
   onDeleteComment,
   deletingCommentId,
   onRestoreComment,
   restoringCommentId,
+  onImageUpload,
+  canModerate = false,
 }: AuthCommentsSectionProps) {
   const router = useRouter()
   const queryClient = useQueryClient()
-  const { session, settings } = useRouteContext({ from: '__root__' })
+  const session = useSessionContext()
+  const settings = useWorkspaceSettings()
   // Use safe version - returns null in admin context where provider isn't available
   const authPopover = useAuthPopoverSafe()
 
@@ -160,11 +172,15 @@ export function AuthCommentsSection({
       statuses={statuses}
       currentStatusId={currentStatusId}
       isTeamMember={isTeamMember}
+      linkAuthors={linkAuthors}
+      authorLinkTo={authorLinkTo}
       hideCommentForm={hideCommentForm}
       onDeleteComment={onDeleteComment}
       deletingCommentId={deletingCommentId}
       onRestoreComment={onRestoreComment}
       restoringCommentId={restoringCommentId}
+      onImageUpload={onImageUpload}
+      canModerate={canModerate}
     />
   )
 }

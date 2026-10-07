@@ -38,6 +38,7 @@ yarn-error.log*
 # Testing
 coverage
 .nyc_output
+.vitest/
 
 # Playwright
 playwright-report/
@@ -67,3 +68,6 @@ apps/web/next-env.d.ts
 docs/superpowers/
 .codex
 .claude/
+
+# Local scratch
+scratchpad/

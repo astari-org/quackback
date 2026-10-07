@@ -4,6 +4,8 @@ import { FormattedMessage } from 'react-intl'
 import { z } from 'zod'
 import { RoadmapBoard } from '@/components/public/roadmap-board'
 import { portalQueries } from '@/lib/client/queries/portal'
+import { readBatch } from '@/lib/client/queries/read-batch'
+import { isProductEnabled } from '@/lib/shared/types/settings'
 
 const searchSchema = z.object({
   roadmap: z.string().optional(),
@@ -22,12 +24,15 @@ export const Route = createFileRoute('/_portal/roadmap/')({
   validateSearch: searchSchema,
   loader: async ({ context }) => {
     const { queryClient, settings, baseUrl, userRole } = context
+    if (!isProductEnabled(settings?.featureFlags, 'feedback')) throw notFound()
 
+    // The shell's lists in one request; the columns ask for their posts once it renders.
+    const ensure = readBatch(queryClient)
     const [roadmaps] = await Promise.all([
-      queryClient.ensureQueryData(portalQueries.roadmaps()),
-      queryClient.ensureQueryData(portalQueries.statuses()),
-      queryClient.ensureQueryData(portalQueries.boards()),
-      queryClient.ensureQueryData(portalQueries.tags()),
+      ensure(portalQueries.roadmaps()),
+      ensure(portalQueries.statuses()),
+      ensure(portalQueries.boards()),
+      ensure(portalQueries.tags()),
     ])
 
     return {
@@ -64,9 +69,6 @@ function RoadmapPage() {
   const { roadmap: selectedRoadmapFromUrl } = Route.useSearch()
 
   const { data: roadmaps } = useSuspenseQuery(portalQueries.roadmaps())
-  const { data: statuses } = useSuspenseQuery(portalQueries.statuses())
-
-  const roadmapStatuses = statuses.filter((s) => s.showOnRoadmap)
 
   // Use URL param if present, otherwise fall back to first roadmap
   const initialSelectedId = selectedRoadmapFromUrl ?? firstRoadmapId
@@ -94,7 +96,6 @@ function RoadmapPage() {
         style={{ animationDelay: '100ms' }}
       >
         <RoadmapBoard
-          statuses={roadmapStatuses}
           initialRoadmaps={roadmaps}
           initialSelectedRoadmapId={initialSelectedId}
           isTeamMember={isTeamMember}

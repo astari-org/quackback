@@ -7,18 +7,32 @@
  * being visible to a subsequent SELECT in the same transaction —
  * inserts are made on the global connection, not the caller's tx.
  */
-import { db, auditLog } from '@/lib/server/db'
+import {
+  db,
+  auditLog,
+  and,
+  desc,
+  eq,
+  gte,
+  lte,
+  ilike,
+  inArray,
+  notInArray,
+  type Transaction,
+} from '@/lib/server/db'
+import type { SQL } from 'drizzle-orm'
 import type { UserId } from '@quackback/ids'
 import { getClientIp } from '@/lib/server/domains/api/rate-limit'
 import type { AuthContext } from '@/lib/server/functions/auth-helpers'
 import { logger } from '@/lib/server/logger'
+import type { JsonValue } from '@/lib/shared/json'
 
 const log = logger.child({ component: 'audit' })
 
 /** A JSON-shaped value — fits into a Postgres jsonb column. Re-exported from the
  *  shared module so client/shared code can reference it without importing from
  *  `@/lib/server`. */
-export type { JsonValue } from '@/lib/shared/json'
+export type { JsonValue }
 
 /**
  * Closed taxonomy of audit event types.
@@ -54,6 +68,10 @@ export type AuditEventType =
   | 'user.role.changed'
   | 'user.invited'
   | 'user.removed'
+  // Custom-role CRUD (role.manage)
+  | 'role.created'
+  | 'role.updated'
+  | 'role.deleted'
   | 'two_factor.reset_by_admin'
   | 'two_factor.enabled'
   | 'two_factor.disabled'
@@ -95,11 +113,57 @@ export type AuditEventType =
   | 'portal.access.denied' // OWASP authz_fail — gate denied an authenticated visitor
   | 'auth.signin.failed' // OWASP authn_login_fail — twin of auth.signin.success
   | 'portal.invite.expired' // emitted by the daily sweep for pending invites past their expiry
+  // Imports & exports hub (§I3): full-content conversation/ticket export
+  | 'export.conversations.downloaded'
+  // Workspace data export (async ZIP): requested from the hub, artifact downloaded
+  | 'export.workspace.requested'
+  | 'export.workspace.downloaded'
+  // AI config changelog: assistant customization mutations surfaced together
+  // on the assistant admin page.
+  | 'assistant.guidance.created'
+  | 'assistant.guidance.updated'
+  | 'assistant.guidance.reordered'
+  | 'assistant.guidance.deleted'
+  | 'assistant.custom_action.created'
+  | 'assistant.custom_action.updated'
+  | 'assistant.custom_action.deleted'
+  | 'assistant.connector.created'
+  | 'assistant.connector.updated'
+  | 'assistant.connector.deleted'
+  | 'assistant.connector.refreshed'
+  | 'assistant.skill.created'
+  | 'assistant.skill.updated'
+  | 'assistant.skill.deleted'
+  | 'assistant.tool_controls.changed'
+  | 'assistant.surfaces.changed'
+  | 'assistant.basics.changed'
+  | 'assistant.identity.changed'
+  | 'assistant.voice.changed'
+  | 'assistant.instructions.changed'
+  | 'assistant.knowledge.changed'
+  | 'assistant.capabilities.changed'
+  | 'assistant.tools.changed'
+  | 'assistant.channels.changed'
+  | 'assistant.deployment.changed'
+  // Verified-email assertion. `emailVerified: true` is a trust decision, not a
+  // data field — it grants the same portal access as a confirmed email
+  // (domain-match, invite claim, segment portal-access grants). Every path
+  // that lets an operator assert it without the user proving ownership emits
+  // one of these.
+  | 'user.email_verified.asserted' // per-user: admin contact creation, REST identify
+  // Restore hygiene. Written by settleExternalSideEffects (@quackback/db) when
+  // a restore stamps the external side-effect ledger so already-sent mail,
+  // webhooks and announcements are not sent a second time. The metadata
+  // carries the restore instant and the per-column outcome.
+  | 'restore.side_effects_settled'
+  // Labs: visibility or enablement changed for a registered experiment
+  | 'labs.experiment.changed'
 
 export type AuditEventOutcome = 'success' | 'failure'
 
-export type AuditActorType = 'user' | 'service' | 'anonymous' | 'system' | 'api_key'
-export type AuditAuthMethod = 'password' | 'sso' | 'magic_link' | 'ott' | 'api_key' | 'session'
+export type AuditActorType = 'user' | 'service' | 'anonymous' | 'system' | 'api_key' | 'support'
+export type AuditAuthMethod =
+  'password' | 'sso' | 'oauth' | 'magic_link' | 'ott' | 'api_key' | 'session'
 
 export interface AuditActor {
   userId?: UserId | null
@@ -157,33 +221,154 @@ function capRequestId(value: string | null): string | null {
 }
 
 export async function recordAuditEvent(input: RecordAuditEventInput): Promise<void> {
+  const values = auditInsertValues(input)
+
+  try {
+    await db.insert(auditLog).values(values)
+  } catch (error) {
+    log.error({ err: error, event: input.event }, 'recordAuditEvent failed')
+  }
+}
+
+function auditInsertValues(input: RecordAuditEventInput): typeof auditLog.$inferInsert {
   const ip = input.headers ? getClientIp(input.headers) : null
   const userAgent = input.headers?.get('user-agent') ?? null
   const requestId = capRequestId(
     input.headers?.get('x-request-id') ?? input.headers?.get('x-correlation-id') ?? null
   )
 
-  try {
-    await db.insert(auditLog).values({
-      eventType: input.event,
-      eventOutcome: input.outcome ?? 'success',
-      actorUserId: input.actor.userId ?? null,
-      actorEmail: input.actor.email ?? null,
-      actorRole: input.actor.role ?? null,
-      actorIp: ip === 'unknown' ? null : ip,
-      actorUserAgent: userAgent,
-      requestId,
-      actorType: input.actor.type ?? null,
-      authMethod: input.actor.authMethod ?? null,
-      targetType: input.target?.type ?? null,
-      targetId: input.target?.id ?? null,
-      beforeValue: input.before ?? null,
-      afterValue: input.after ?? null,
-      metadata: input.metadata ?? null,
-    })
-  } catch (error) {
-    log.error({ err: error, event: input.event }, 'recordAuditEvent failed')
+  return {
+    eventType: input.event,
+    eventOutcome: input.outcome ?? 'success',
+    actorUserId: input.actor.userId ?? null,
+    actorEmail: input.actor.email ?? null,
+    actorRole: input.actor.role ?? null,
+    actorIp: ip === 'unknown' ? null : ip,
+    actorUserAgent: userAgent,
+    requestId,
+    actorType: input.actor.type ?? null,
+    authMethod: input.actor.authMethod ?? null,
+    targetType: input.target?.type ?? null,
+    targetId: input.target?.id ?? null,
+    beforeValue: input.before ?? null,
+    afterValue: input.after ?? null,
+    metadata: input.metadata ?? null,
   }
+}
+
+/** Strict audit insert for mutations whose data write and audit row must commit together. */
+export async function recordAuditEventInTransaction(
+  tx: Transaction,
+  input: RecordAuditEventInput
+): Promise<void> {
+  await tx.insert(auditLog).values(auditInsertValues(input))
+}
+
+/**
+ * A single audit_log row, projected for readers. The paginated admin feed
+ * (listAuditEventsFn) returns this.
+ */
+export interface AuditEventRow {
+  id: string
+  occurredAt: string
+  actorUserId: string | null
+  actorEmail: string | null
+  actorRole: string | null
+  actorIp: string | null
+  actorUserAgent: string | null
+  eventType: string
+  eventOutcome: AuditEventOutcome
+  targetType: string | null
+  targetId: string | null
+  beforeValue: JsonValue | null
+  afterValue: JsonValue | null
+  metadata: JsonValue | null
+  // Observability columns from migration 0070. requestId is indexed —
+  // join point for "show me everything that happened during request X"
+  // forensics. actorType disambiguates user / service / anonymous in
+  // mixed-traffic timelines. authMethod records HOW the actor signed
+  // in (session, api-key, sso, magic-link) when known.
+  requestId: string | null
+  actorType: string | null
+  authMethod: string | null
+}
+
+export interface QueryAuditEventsFilters {
+  /** Exact match against a single event type. */
+  eventType?: string
+  /** Inclusion filter against a set of event types (`inArray`) — the
+   *  companion to `excludeEventTypes`, used by readers that only ever want
+   *  a fixed, known set (e.g. the AI config changelog). Ignored when
+   *  `eventType` is also set. */
+  eventTypes?: AuditEventType[]
+  actorUserId?: UserId
+  /** Substring match against the denormalised `actor_email` column,
+   *  case-insensitive. Trimmed and lower-cased here. */
+  actorEmail?: string
+  from?: Date
+  to?: Date
+  /** Event types to exclude. Ignored when `eventType` or `eventTypes` is
+   *  set — a deliberate selection always wins over the default-hide
+   *  behaviour. */
+  excludeEventTypes?: string[]
+  limit: number
+}
+
+/**
+ * Shared row query behind the paginated admin feed (listAuditEventsFn).
+ *
+ * No auth in here — the caller holds its own `requireAuth` gate before
+ * calling in.
+ */
+export async function queryAuditEvents(filters: QueryAuditEventsFilters): Promise<AuditEventRow[]> {
+  const conditions: SQL[] = []
+  if (filters.eventType) conditions.push(eq(auditLog.eventType, filters.eventType))
+  if (filters.eventTypes && filters.eventTypes.length > 0) {
+    conditions.push(inArray(auditLog.eventType, filters.eventTypes))
+  }
+  if (filters.actorUserId) conditions.push(eq(auditLog.actorUserId, filters.actorUserId))
+  if (filters.actorEmail) {
+    conditions.push(ilike(auditLog.actorEmail, `%${filters.actorEmail.trim().toLowerCase()}%`))
+  }
+  if (filters.from) conditions.push(gte(auditLog.occurredAt, filters.from))
+  if (filters.to) conditions.push(lte(auditLog.occurredAt, filters.to))
+  if (
+    !filters.eventType &&
+    !filters.eventTypes &&
+    filters.excludeEventTypes &&
+    filters.excludeEventTypes.length > 0
+  ) {
+    conditions.push(notInArray(auditLog.eventType, filters.excludeEventTypes))
+  }
+
+  const whereClause = conditions.length > 0 ? and(...conditions) : undefined
+
+  const rows = await db
+    .select()
+    .from(auditLog)
+    .where(whereClause)
+    .orderBy(desc(auditLog.occurredAt))
+    .limit(filters.limit)
+
+  return rows.map((row) => ({
+    id: row.id,
+    occurredAt: row.occurredAt.toISOString(),
+    actorUserId: row.actorUserId,
+    actorEmail: row.actorEmail,
+    actorRole: row.actorRole,
+    actorIp: row.actorIp,
+    actorUserAgent: row.actorUserAgent,
+    eventType: row.eventType,
+    eventOutcome: row.eventOutcome as AuditEventOutcome,
+    targetType: row.targetType,
+    targetId: row.targetId,
+    beforeValue: (row.beforeValue as JsonValue | null) ?? null,
+    afterValue: (row.afterValue as JsonValue | null) ?? null,
+    metadata: (row.metadata as JsonValue | null) ?? null,
+    requestId: row.requestId,
+    actorType: row.actorType,
+    authMethod: row.authMethod,
+  }))
 }
 
 /** Cap on the `metadata.reason` extracted from thrown errors. */

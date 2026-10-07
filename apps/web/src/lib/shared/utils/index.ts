@@ -13,14 +13,23 @@ export {
   normalizeStrength,
   strengthTier,
   formatBadgeCount,
-  slugify,
 } from './string'
 export {
   escapeHtmlAttr,
   sanitizeUrl,
   sanitizeImageUrl,
-  sanitizeImageUrl as sanitizeImageSrc,
   safePositiveInt,
   extractYoutubeId,
 } from './sanitize'
-export { toIsoString, toIsoStringOrNull, toIsoDateOnly } from './date'
+export {
+  toIsoString,
+  toIsoStringOrNull,
+  toIsoDateOnly,
+  formatMonthYear,
+  parseCalendarDate,
+  formatCalendarDate,
+  tomorrowAt,
+  startOfUtcMonth,
+  inHours,
+  nextMondayAt,
+} from './date'

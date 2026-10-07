@@ -3,7 +3,7 @@
  * The import handler's override flips this when authorPrincipalId is given.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { CommentId, PostId, PrincipalId, SegmentId, StatusId } from '@quackback/ids'
+import type { PostCommentId, PostId, PrincipalId, SegmentId, PostStatusId } from '@quackback/ids'
 import type { Actor } from '@/lib/server/policy/types'
 
 const insertedComments: Record<string, unknown>[] = []
@@ -24,7 +24,7 @@ vi.mock('@/lib/server/db', async () => {
         const last = insertedComments.at(-1) ?? {}
         return [
           {
-            id: 'comment_new' as unknown as CommentId,
+            id: 'comment_new' as unknown as PostCommentId,
             postId: 'post_p' as unknown as PostId,
             content: 'Hi',
             parentId: null,
@@ -57,7 +57,7 @@ vi.mock('@/lib/server/db', async () => {
             id: 'post_p',
             title: 'P',
             boardId: 'board_b',
-            statusId: 'status_open',
+            statusId: 'post_status_open',
             isCommentsLocked: false,
             moderationState: 'published',
             principalId: null,
@@ -76,9 +76,9 @@ vi.mock('@/lib/server/db', async () => {
             },
           }),
         },
-        comments: { findFirst: vi.fn(), findMany: vi.fn().mockResolvedValue([]) },
+        postComments: { findFirst: vi.fn(), findMany: vi.fn().mockResolvedValue([]) },
         postStatuses: {
-          findFirst: vi.fn().mockResolvedValue({ id: 'status_open', name: 'Open' }),
+          findFirst: vi.fn().mockResolvedValue({ id: 'post_status_open', name: 'Open' }),
         },
       },
       transaction: vi.fn(async (fn: (tx: unknown) => Promise<unknown>) => fn(tx)),
@@ -88,13 +88,13 @@ vi.mock('@/lib/server/db', async () => {
     isNull: vi.fn(),
     asc: vi.fn(),
     sql: realSql,
-    comments: { __name: 'comments', id: 'id', postId: 'postId', parentId: 'parentId' },
+    postComments: { __name: 'comments', id: 'id', postId: 'postId', parentId: 'parentId' },
     posts: { __name: 'posts', id: 'id', commentCount: 'comment_count' },
     boards: { id: 'id' },
     postStatuses: { id: 'id' },
     postActivity: {},
-    commentReactions: {},
-    commentEditHistory: {},
+    postCommentReactions: {},
+    postCommentEditHistory: {},
   }
 })
 
@@ -120,6 +120,10 @@ vi.mock('@/lib/server/domains/settings/settings.service', () => ({
   getPortalConfig: vi.fn().mockResolvedValue({
     moderationDefault: { requireApproval: 'none' },
   }),
+}))
+
+vi.mock('@/lib/server/content/rehost-images', () => ({
+  rehostExternalImages: vi.fn(async (json: unknown) => json),
 }))
 
 // A minimal team actor sufficient for all three tests (public board, published post)
@@ -186,7 +190,7 @@ async function mockPostWithApproval(approvalComments: boolean) {
     id: 'post_p',
     title: 'P',
     boardId: 'board_b',
-    statusId: 'status_open',
+    statusId: 'post_status_open',
     isCommentsLocked: false,
     moderationState: 'published',
     principalId: null,
@@ -207,7 +211,7 @@ async function mockPostWithApproval(approvalComments: boolean) {
         },
       },
     },
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- minimal fixture
+    // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- minimal fixture
   } as any)
 }
 
@@ -323,7 +327,7 @@ describe('createComment — records a status.changed activity for the audit log'
     // Promise.all fetches new status first, then the post's current status.
     vi.mocked(db.query.postStatuses.findFirst)
       .mockResolvedValueOnce({
-        id: 'status_closed',
+        id: 'post_status_closed',
         name: 'Closed',
         slug: 'closed',
         color: '#111',
@@ -335,7 +339,7 @@ describe('createComment — records a status.changed activity for the audit log'
         deletedAt: null,
       })
       .mockResolvedValueOnce({
-        id: 'status_open',
+        id: 'post_status_open',
         name: 'Open',
         slug: 'open',
         color: '#888',
@@ -353,7 +357,7 @@ describe('createComment — records a status.changed activity for the audit log'
       {
         postId: 'post_p' as unknown as PostId,
         content: 'Closing this out',
-        statusId: 'status_closed' as unknown as StatusId,
+        statusId: 'post_status_closed' as unknown as PostStatusId,
       },
       { principalId: 'principal_admin' as unknown as PrincipalId, role: 'admin' },
       teamActor,
@@ -402,7 +406,7 @@ describe('createComment — soft-deleted board is rejected as POST_NOT_FOUND', (
       id: 'post_p',
       title: 'P',
       boardId: 'board_b',
-      statusId: 'status_open',
+      statusId: 'post_status_open',
       isCommentsLocked: false,
       moderationState: 'published',
       principalId: null,
@@ -419,7 +423,7 @@ describe('createComment — soft-deleted board is rejected as POST_NOT_FOUND', (
           moderation: { anonPosts: 'inherit', signedPosts: 'inherit', comments: 'inherit' },
         },
       },
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- minimal fixture
+      // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- minimal fixture
     } as any)
 
     const { createComment } = await import('../comment.service')
@@ -434,5 +438,57 @@ describe('createComment — soft-deleted board is rejected as POST_NOT_FOUND', (
 
     // And no comment is inserted.
     expect(insertedComments).toHaveLength(0)
+  })
+})
+
+describe('createComment content holds', () => {
+  beforeEach(() => {
+    insertedComments.length = 0
+  })
+
+  it('holds a comment with an image when holdImages is on', async () => {
+    const { getPortalConfig } = await import('@/lib/server/domains/settings/settings.service')
+    vi.mocked(getPortalConfig).mockResolvedValueOnce({
+      moderationDefault: { requireApproval: 'none', holdImages: true },
+    } as Awaited<ReturnType<typeof getPortalConfig>>)
+    await mockPostWithApproval(false)
+    const { createComment } = await import('../comment.service')
+    await createComment(
+      {
+        postId: 'post_p' as unknown as PostId,
+        content: 'screenshot',
+        contentJson: {
+          type: 'doc',
+          content: [{ type: 'image', attrs: { src: 'https://cdn.example.com/x.png' } }],
+        },
+      },
+      { principalId: 'principal_uv' as unknown as PrincipalId, role: 'user' },
+      portalActor,
+      { skipDispatch: true }
+    )
+    expect(insertedComments[0]).toMatchObject({ moderationState: 'pending' })
+  })
+
+  it('does not hold a team comment with an image when holdImages is on', async () => {
+    const { getPortalConfig } = await import('@/lib/server/domains/settings/settings.service')
+    vi.mocked(getPortalConfig).mockResolvedValueOnce({
+      moderationDefault: { requireApproval: 'none', holdImages: true },
+    } as Awaited<ReturnType<typeof getPortalConfig>>)
+    await mockPostWithApproval(false)
+    const { createComment } = await import('../comment.service')
+    await createComment(
+      {
+        postId: 'post_p' as unknown as PostId,
+        content: 'screenshot',
+        contentJson: {
+          type: 'doc',
+          content: [{ type: 'image', attrs: { src: 'https://cdn.example.com/x.png' } }],
+        },
+      },
+      { principalId: 'principal_admin' as unknown as PrincipalId, role: 'admin' },
+      teamActor,
+      { skipDispatch: true }
+    )
+    expect(insertedComments[0]).toMatchObject({ moderationState: 'published' })
   })
 })

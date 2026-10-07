@@ -1,11 +1,13 @@
 import { db, eq, settings } from '@/lib/server/db'
 import { deleteObject } from '@/lib/server/storage/s3'
 import { ValidationError } from '@/lib/shared/errors'
+import { advancedCssRemainder } from '@/lib/shared/theme/generator'
 import { assertNotManaged } from '@/lib/server/config-file/managed-guard'
 import { logger } from '@/lib/server/logger'
 import type { BrandingConfig } from './settings.types'
 import {
   requireSettings,
+  requireSettingsCached,
   wrapDbError,
   parseJsonOrNull,
   invalidateSettingsCache,
@@ -19,7 +21,8 @@ const log = logger.child({ component: 'settings-media' })
 
 export async function getBrandingConfig(): Promise<BrandingConfig> {
   try {
-    const org = await requireSettings()
+    // Read-only + on public hot paths (config.json, portal SSR): cached row.
+    const org = await requireSettingsCached()
     return parseJsonOrNull<BrandingConfig>(org.brandingConfig) ?? {}
   } catch (error) {
     log.error({ err: error }, 'get branding config failed')
@@ -58,7 +61,8 @@ export async function updateBrandingConfig(config: BrandingConfig): Promise<Bran
 
 export async function getCustomCss(): Promise<string> {
   try {
-    const org = await requireSettings()
+    // Read-only + on public hot paths (config.json, portal SSR): cached row.
+    const org = await requireSettingsCached()
     return org.customCss ?? ''
   } catch (error) {
     log.error({ err: error }, 'get custom css failed')
@@ -69,15 +73,20 @@ export async function getCustomCss(): Promise<string> {
 export async function updateCustomCss(css: string): Promise<string> {
   log.info('update custom css')
   try {
-    // Clearing CSS (empty string) is always allowed so a workspace whose
-    // tier just stopped including custom CSS can wipe it without being
-    // blocked. Anything non-empty hits the feature gate.
-    if (css.trim().length > 0) {
+    if (css.includes('<')) {
+      throw new ValidationError('INVALID_CUSTOM_CSS', 'Custom CSS cannot contain the "<" character')
+    }
+    const org = await requireSettings()
+    const trimmed = css.trim()
+    // Empty is always allowed so a workspace whose tier just stopped including
+    // custom CSS can wipe it. Stripping generated theme declarations from CSS
+    // already stored is also ungated — that rewrite cannot introduce extra
+    // rules. Any other non-empty write hits the feature gate.
+    if (trimmed.length > 0 && trimmed !== advancedCssRemainder(org.customCss ?? '')) {
       const { assertTierFeature } = await import('./tier-enforce')
       await assertTierFeature('customCss', 'Custom CSS')
     }
 
-    const org = await requireSettings()
     await db.update(settings).set({ customCss: css }).where(eq(settings.id, org.id))
     await invalidateSettingsCache()
     return css
@@ -119,7 +128,8 @@ export async function saveLogoKey(key: string): Promise<{ success: true; key: st
 }
 
 /**
- * Delete logo from S3 and clear the key.
+ * Delete logo from S3 and clear the key. The favicon is derived from the
+ * logo at upload, so removing the logo clears both keys.
  */
 export async function deleteLogoKey(): Promise<{ success: true }> {
   log.info('delete logo key')
@@ -133,8 +143,18 @@ export async function deleteLogoKey(): Promise<{ success: true }> {
         log.warn({ err, logo_key: org.logoKey }, 'failed to delete logo s3 object')
       }
     }
+    if (org.faviconKey) {
+      try {
+        await deleteObject(org.faviconKey)
+      } catch (err) {
+        log.warn({ err, favicon_key: org.faviconKey }, 'failed to delete favicon s3 object')
+      }
+    }
 
-    await db.update(settings).set({ logoKey: null }).where(eq(settings.id, org.id))
+    await db
+      .update(settings)
+      .set({ logoKey: null, faviconKey: null })
+      .where(eq(settings.id, org.id))
     await invalidateSettingsCache()
 
     return { success: true }
